@@ -1,0 +1,98 @@
+neoconv
+-------
+MAME Neo Geo romset (.zip) to TerraOnion (.neo) converter, in ISO C99.
+
+Static decryption only: CMC42/CMC50 C/S/M1, SMA 68K, NEO-PCM2 (both variants),
+PVC, KOF98, the KOF2002 family, and bootleg decryption are applied at
+conversion time, mirroring the "decrypt_all()" sequence of the matching
+matching MAME cart device. Runtime protection (SMA banking/PRNG, PVC
+registers, game-specific protection/anti-piracy) is the .neo consumer's
+responsibility. In other words, this decrypts encrypted data but does not
+patch out any game code.
+
+Build
+-----
+  make            # libneoconv.a + neoconv CLI
+  make shared     # libneoconv.so (hidden visibility, 9 exported symbols)
+  make test       # API conformance + synthetic round-trip/recipe tests
+  make asan       # sanitized build
+
+Embedding (frontends)
+---------------------
+The library API (include/neoconv.h) is frontend-agnostic ISO C99: no POSIX, no
+output to stdio when a log callback is installed, and static string lifetimes
+for all database queries. The intended pattern for a GUI is: enumerate sets
+with neoconv_game_desc_get() to build the library view, validate zips with the
+dry_run option, and convert on a worker thread with warnings routed through the
+log callback. Conversions must be serialized (the MAME-derived decryption code
+keeps translation-unit state); a single worker thread is the supported model.
+Initialize options with neoconv_options_init() - the struct records its size so
+it can grow compatibly.
+
+Usage
+-----
+  neoconv mslug.zip                       # -> mslug.neo
+  neoconv -o out/ /path/to/romdir         # whole directory
+  neoconv -o out/ '/path/to/romdir/*.zip' # same, via (quoted) glob
+  neoconv -o out/ *.zip                   # shell-expanded batch
+  neoconv kof99h.zip                      # split clone: kof99.zip is
+                                          # found automatically beside it
+  neoconv --strict --set kof2002 a.zip -o kof2002.neo
+  neoconv --list
+
+Inputs may be zip files, directories (every contained *.zip), or glob
+patterns (quoted, so the shell passes them through).  In directory or glob
+mode, zips that are not known romsets - neogeo.zip, stray archives - are
+skipped without failing the run; the -o directory is created if missing. Set
+identification is by zip file name (or --set).  For split-set clones,
+<parent>.zip next to the input is searched automatically for ROMs the clone zip
+does not carry (--no-auto-parent disables this, -p <zip> adds further archives
+for unusual layouts). ROMs are matched by file name, falling back to CRC32. CRC
+mismatches warn by default. NGH is read from the decrypted P ROM at 0x108
+(override with --ngh).
+
+Header metadata
+---------------
+Genre, screenshot, and the short game titles/manufacturers are TerraOnion
+assigned and cannot be derived from MAME. They ship in src/meta_db.c, generated
+from data/known_good.tsv (a dump of a known-good .neo set). Header Name and
+Manufacturer come from this table when available, falling back to the MAME
+fullname otherwise. To refresh from another set:
+
+    tools/dump_neo.py /path/to/known-good-neo-dir > data/known_good.tsv
+    tools/gen_meta.py data/known_good.tsv -o src/meta_db.c
+    make
+
+"dump_neo.py" prints filename, year, genre, screenshot, NGH, name,
+manufacturer, and the six region sizes for every .neo in a directory
+(tab-separated). The known-good sizes drive one transformation: early dual-bus
+carts have a physically separate ADPCM-B ROM that MAME merges into the adpcma
+region; when the known-good set records a V1/V2 pair summing to our merged
+chain, the converter splits at that boundary. The known-good sizes also decide
+per-set V handling that MAME cannot express (whole-image V2 for shared-bus
+delta-T carts, whether prototype tail-copies split or stay merged) and the P
+window kept for BrezzaSoft-style RAM boards. Other size disagreements are
+warned, never silently adopted. Runtime-overlay patches that MAME bakes into P
+at init (kof10th's Altera CPLD overlays, sbp's word patch) are NOT applied; the
+consumer's board emulation performs them, and reference sets ship the unpatched
+programs. pbobblenb's C is 0x100000 per current MAME's compacted bootleg
+layout, where the reference set reflects the older 0x500000 parent-shaped
+layout; the data is equivalent under tile-index masking. The table also
+cross-checks the NGH extracted from the P ROM and prefers the known-good value
+on disagreement.  --genre / --screenshot / --ngh always override the table.
+
+Regenerating from MAME
+----------------------
+The game database (src/games_db.c) and the crypto ports (src/crypt/) are
+generated from a MAME checkout:
+
+  make regen MAMEDIR=path/to/mame
+
+tools/gendb.py parses src/mame/snk/neogeo.cpp (ROM_START blocks, GAME()
+metadata, machine-config -> cart-slot bindings); tools/port_crypto.py
+mechanically translates src/devices/bus/neogeo/prot_*.cpp to C99.
+
+License
+-------
+BSD-3-Clause.  Algorithms, tables, and layout data derived from MAME
+(BSD-3-Clause).  miniz is MIT.
